@@ -1,0 +1,323 @@
+"""
+Side-by-side preview gallery for one duplicate group.
+
+Full video playback inside tkinter needs something heavy (python-vlc, which
+in turn needs VLC installed) - out of scope for a single-file exe with no
+extra runtime dependency.  Instead each video shows a small grid of the same
+frames sampled for fingerprinting, which is both cheap (already-decoded
+positions, no extra seeking logic to write) and honest about what the
+detector actually looked at.  Double-click still opens the real file in the
+user's default player via :func:`dupvideo.shellops.open_file`.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import sys
+import tkinter as tk
+from collections import OrderedDict
+from collections.abc import Callable, Mapping, Sequence
+from tkinter import ttk
+
+from PIL import Image, ImageTk
+
+from .engine import VidInfo, sampled_frame_previews
+from .theme import ACCENT, BORDER, ELEV, FG, FG_MUTED, FONT, FONT_BOLD, WINDOW
+
+THUMB_MIN = 160             # never shrink a video's whole preview block below this
+THUMB_MAX = 620             # width cap so a lone video isn't huge
+CAPTION_SPACE = 150         # vertical room reserved for caption + checkbox
+FRAME_GAP = 2               # gap between mini-frames inside one video's grid
+CACHE_BUDGET = 160 << 20    # ~160 MB of decoded preview frames
+RESIZE_DEBOUNCE_MS = 130
+
+
+class _FrameSetCache:
+    """
+    LRU cache of decoded sample-frame lists, keyed by video path.
+
+    Re-decoding 7 frames from a video on every window resize is far too slow,
+    but an unbounded cache would happily eat all available memory while
+    browsing a large result set - each video costs several times what a
+    single image thumbnail did in the sibling project, so the budget is
+    tracked the same way but sized down accordingly.
+    """
+
+    def __init__(self, budget: int = CACHE_BUDGET) -> None:
+        self._budget = budget
+        self._items: OrderedDict[str, list[Image.Image]] = OrderedDict()
+        self._bytes = 0
+
+    @staticmethod
+    def _cost(frames: list[Image.Image]) -> int:
+        return sum(f.width * f.height * 3 for f in frames)
+
+    def get(self, path: str) -> list[Image.Image]:
+        cached = self._items.get(path)
+        if cached is not None:
+            self._items.move_to_end(path)
+            return cached
+
+        frames = sampled_frame_previews(path)
+        for frame in frames:
+            frame.thumbnail((480, 480), Image.Resampling.LANCZOS)
+
+        self._items[path] = frames
+        self._bytes += self._cost(frames)
+        while self._bytes > self._budget and len(self._items) > 1:
+            _, evicted = self._items.popitem(last=False)
+            self._bytes -= self._cost(evicted)
+        return frames
+
+    def discard(self, path: str) -> None:
+        frames = self._items.pop(path, None)
+        if frames is not None:
+            self._bytes -= self._cost(frames)
+
+    def clear(self) -> None:
+        self._items.clear()
+        self._bytes = 0
+
+
+def _grid_shape(n: int) -> tuple[int, int]:
+    """(rows, cols) for arranging ``n`` mini-frames into a compact block."""
+    if n <= 0:
+        return (1, 1)
+    cols = min(n, 4)
+    rows = math.ceil(n / cols)
+    return rows, cols
+
+
+class Gallery(ttk.LabelFrame):
+    """Scrollable, resizable strip of per-video frame grids with checkboxes."""
+
+    def __init__(self, master: tk.Misc, scale: float = 1.0,
+                 on_open: Callable[[str], None] | None = None) -> None:
+        super().__init__(master, text="  PREVIEW  ")
+        self._scale = scale
+        self._on_open = on_open
+        self._cache = _FrameSetCache()
+        self._group: Sequence[VidInfo] | None = None
+        self._vars: Mapping[str, tk.BooleanVar] = {}
+        self._photos: list[ImageTk.PhotoImage] = []
+        self._resize_job: str | None = None
+        self._last_size = (0, 0)
+        self._weighted: tuple[tuple[int, ...], tuple[int, ...]] = ((), ())
+
+        self.canvas = tk.Canvas(self, background=WINDOW, highlightthickness=0,
+                                bd=0, takefocus=True)
+        vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        hsb = ttk.Scrollbar(self, orient="horizontal",
+                            command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.canvas.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.inner = tk.Frame(self.canvas, bg=WINDOW)
+        self._window = self.canvas.create_window((0, 0), window=self.inner,
+                                                 anchor="nw")
+
+        self.canvas.bind("<Configure>", self._on_configure)
+        self.inner.bind("<Configure>", lambda _e: self._fit_window())
+        self.canvas.bind("<Enter>", self._bind_wheel)
+        self.canvas.bind("<Leave>", self._unbind_wheel)
+
+        self.show_message("Scan, then select a duplicate group to\n"
+                          "compare its videos side by side.")
+
+    # ---- scrolling -------------------------------------------------------- #
+    def _bind_wheel(self, _event: tk.Event | None = None) -> None:
+        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
+        self.canvas.bind_all("<Shift-MouseWheel>", self._on_shift_wheel)
+        if sys.platform.startswith("linux"):    # X11 sends buttons 4/5
+            self.canvas.bind_all("<Button-4>", self._on_wheel)
+            self.canvas.bind_all("<Button-5>", self._on_wheel)
+
+    def _unbind_wheel(self, _event: tk.Event | None = None) -> None:
+        for sequence in ("<MouseWheel>", "<Shift-MouseWheel>",
+                         "<Button-4>", "<Button-5>"):
+            self.canvas.unbind_all(sequence)
+
+    @staticmethod
+    def _wheel_steps(event: tk.Event) -> int:
+        if getattr(event, "num", 0) == 4:
+            return -1
+        if getattr(event, "num", 0) == 5:
+            return 1
+        return -1 if event.delta > 0 else 1
+
+    def _on_wheel(self, event: tk.Event) -> None:
+        if self._overflows_vertically():
+            self.canvas.yview_scroll(self._wheel_steps(event), "units")
+        else:
+            self.canvas.xview_scroll(self._wheel_steps(event) * 3, "units")
+
+    def _on_shift_wheel(self, event: tk.Event) -> None:
+        self.canvas.xview_scroll(self._wheel_steps(event) * 3, "units")
+
+    def _overflows_vertically(self) -> bool:
+        first, last = self.canvas.yview()
+        return not (first <= 0.0 and last >= 1.0)
+
+    # ---- layout ----------------------------------------------------------- #
+    def _on_configure(self, event: tk.Event) -> None:
+        width, height = event.width, event.height
+        last_w, last_h = self._last_size
+        if abs(width - last_w) < 8 and abs(height - last_h) < 8:
+            return
+        self._last_size = (width, height)
+        self._fit_window()
+        if self._group is None:
+            return
+        if self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(RESIZE_DEBOUNCE_MS, self._render)
+
+    def _fit_window(self) -> None:
+        width = max(self.canvas.winfo_width(), self.inner.winfo_reqwidth())
+        height = max(self.canvas.winfo_height(), self.inner.winfo_reqheight())
+        self.canvas.itemconfigure(self._window, width=width, height=height)
+        self.canvas.configure(scrollregion=(0, 0, width, height))
+
+    def _video_box(self, count: int) -> tuple[int, int]:
+        """Total block size (grid of mini-frames) reserved for one video."""
+        scale = self._scale
+        canvas_w = self.canvas.winfo_width() or round(900 * scale)
+        canvas_h = self.canvas.winfo_height() or round(540 * scale)
+        reserved = round(CAPTION_SPACE * scale)
+        box_h = int(max(THUMB_MIN * scale,
+                        min(THUMB_MAX, canvas_h - reserved)))
+        share = (canvas_w - 28 * scale) / max(1, count) - 18 * scale
+        box_w = int(min(THUMB_MAX * scale, max(THUMB_MIN * scale, share)))
+        return box_w, box_h
+
+    # ---- content ---------------------------------------------------------- #
+    def _reset(self) -> None:
+        if self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+            self._resize_job = None
+        for child in self.inner.winfo_children():
+            child.destroy()
+        self._photos.clear()
+        for index in self._weighted[0]:
+            self.inner.grid_rowconfigure(index, weight=0)
+        for index in self._weighted[1]:
+            self.inner.grid_columnconfigure(index, weight=0)
+        self._weighted = ((), ())
+
+    def _set_spacers(self, rows: tuple[int, ...],
+                     columns: tuple[int, ...]) -> None:
+        for index in rows:
+            self.inner.grid_rowconfigure(index, weight=1)
+        for index in columns:
+            self.inner.grid_columnconfigure(index, weight=1)
+        self._weighted = (rows, columns)
+
+    def show_message(self, text: str) -> None:
+        self._group = None
+        self._vars = {}
+        self._reset()
+        self._set_spacers((0, 2), (0, 2))
+        tk.Label(self.inner, text=text, bg=WINDOW, fg=FG_MUTED,
+                 font=(FONT, 11), justify="center").grid(row=1, column=1)
+        self._fit_window()
+
+    def show_group(self, group: Sequence[VidInfo],
+                   variables: Mapping[str, tk.BooleanVar]) -> None:
+        self._group = group
+        self._vars = variables
+        self._render()
+
+    def forget_paths(self, paths: set[str]) -> None:
+        for path in paths:
+            self._cache.discard(path)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
+    def _render(self) -> None:
+        self._resize_job = None
+        group = self._group
+        if not group:
+            return
+        self._reset()
+
+        box_w, box_h = self._video_box(len(group))
+        scale = self._scale
+        pad = round(8 * scale)
+
+        self._set_spacers((0, 2), (0, len(group) + 1))
+
+        for column, info in enumerate(group, start=1):
+            cell = tk.Frame(self.inner, bg=WINDOW)
+            cell.grid(row=1, column=column, sticky="n",
+                      padx=pad, pady=round(10 * scale))
+            self._build_cell(cell, info, box_w, box_h)
+
+        self._fit_window()
+        self.canvas.xview_moveto(0.0)
+        self.canvas.yview_moveto(0.0)
+
+    def _frame_grid(self, parent: tk.Widget, info: VidInfo, box_w: int,
+                    box_h: int) -> None:
+        try:
+            frames = self._cache.get(info.path)
+        except Exception:
+            frames = []
+        if not frames:
+            tk.Label(parent, text="[cannot preview]", fg=FG_MUTED, bg=WINDOW,
+                     width=20, height=6, wraplength=box_w,
+                     justify="center").pack()
+            return
+
+        rows, cols = _grid_shape(len(frames))
+        gap = FRAME_GAP
+        cell_w = max(1, (box_w - gap * (cols - 1)) // cols)
+        cell_h = max(1, (box_h - gap * (rows - 1)) // rows)
+
+        grid = tk.Frame(parent, bg=WINDOW)
+        grid.pack()
+        opener = self._on_open
+        for index, frame in enumerate(frames):
+            thumb = frame.copy()
+            thumb.thumbnail((cell_w, cell_h), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(thumb)
+            self._photos.append(photo)
+            holder = tk.Frame(grid, bg=BORDER, padx=1, pady=1,
+                              width=cell_w, height=cell_h)
+            holder.grid(row=index // cols, column=index % cols,
+                       padx=gap // 2, pady=gap // 2)
+            holder.grid_propagate(False)
+            label = tk.Label(holder, image=photo, bg=WINDOW, bd=0,
+                             cursor="hand2")
+            label.place(relx=0.5, rely=0.5, anchor="center")
+            if opener is not None:
+                label.bind("<Double-1>", lambda _e, p=info.path: opener(p))
+
+    def _build_cell(self, cell: tk.Frame, info: VidInfo, box_w: int,
+                    box_h: int) -> None:
+        scale = self._scale
+        self._frame_grid(cell, info, box_w, box_h)
+
+        tk.Label(cell, text=os.path.basename(info.path), bg=WINDOW, fg=FG,
+                 font=(FONT_BOLD, 10), wraplength=max(box_w, 160),
+                 justify="center").pack(pady=(round(8 * scale), 1))
+        tk.Label(cell, text=f"Match {info.match:.1f}%", bg=WINDOW, fg=ACCENT,
+                 font=(FONT_BOLD, 9)).pack()
+        tk.Label(cell, text=f"{info.res_str}   ·   {info.duration_str}   ·   "
+                            f"{info.size_str}\n{info.date_str}",
+                 bg=WINDOW, fg=FG_MUTED, font=(FONT, 9),
+                 justify="center").pack(pady=(1, round(6 * scale)))
+
+        variable = self._vars.get(info.path)
+        if variable is not None:
+            tk.Checkbutton(
+                cell, text="Delete this file", variable=variable, bg=WINDOW,
+                fg=FG, selectcolor=ELEV, activebackground=WINDOW,
+                activeforeground=FG, font=(FONT, 9), highlightthickness=0,
+                bd=0, cursor="hand2").pack()

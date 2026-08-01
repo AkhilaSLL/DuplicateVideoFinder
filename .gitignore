@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyInstaller output
+build/
+dist/
+*.manifest
+
+# Editors / OS
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local scratch / probing
+probe/
+_smoke.py
+_probe.py
+_bench.py
+_commit_msg.txt
+_shot.png
+_exe_shot.png
+_probe_shot.png
