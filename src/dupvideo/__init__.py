@@ -17,7 +17,7 @@ Deletion is ALWAYS to the Recycle Bin (via send2trash) - never permanent -
 and can be undone.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = ["__version__", "main"]
 
