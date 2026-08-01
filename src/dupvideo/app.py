@@ -98,6 +98,9 @@ class App(tk.Tk):
         self._phase_rate = False
         self._phase_unit = ""
         self._phase_done = 0
+        self._current_file = ""
+        self._current_frame_done = 0
+        self._current_frame_total = 0
 
         self._build_ui()
         self._apply_settings()
@@ -465,6 +468,9 @@ class App(tk.Tk):
         self._phase_rate = rate
         self._phase_unit = unit
         self._phase_done = 0
+        self._current_file = ""
+        self._current_frame_done = 0
+        self._current_frame_total = 0
         self.progress.config(maximum=100, value=0)
         self._refresh_status()
 
@@ -480,6 +486,8 @@ class App(tk.Tk):
             infos, errors = scan_videos(
                 paths,
                 progress=lambda done, total: put(("progress", (done, total))),
+                frame_progress=lambda path, done, total: put(
+                    ("frame", (path, done, total))),
                 cancel=cancel, cache=cache)
             if cancel.is_set():
                 put(("cancelled", None))
@@ -509,6 +517,17 @@ class App(tk.Tk):
                 elif kind == "progress":
                     # Coalesce: one repaint per poll, not one per file/pair.
                     latest_progress = payload
+                elif kind == "frame":
+                    # Sub-file granularity: which video is in flight right
+                    # now, and how far into its sampled frames. Seeking a
+                    # single large/high-bitrate file can take far longer than
+                    # the average, so without this the status line looks
+                    # frozen between file completions even though a worker
+                    # is actively decoding.
+                    path, fdone, ftotal = payload
+                    self._current_file = os.path.basename(path)
+                    self._current_frame_done = fdone
+                    self._current_frame_total = ftotal
                 elif kind == "error":
                     self._finish_scan()
                     self._summary = "Scan failed."
@@ -533,6 +552,11 @@ class App(tk.Tk):
             pass
         if latest_progress is not None:
             self._show_progress(*latest_progress)
+        elif self._phase_rate:
+            # No new file/pair finished this tick, but repaint anyway so
+            # elapsed time (and the recalculated ETA) visibly keep moving
+            # instead of looking stuck on a slow file.
+            self._show_progress(self._phase_done, self._phase_total)
         self._poll_job = self.after(POLL_MS, self._poll_queue)
 
     def _show_progress(self, done: int, total: int) -> None:
@@ -546,9 +570,15 @@ class App(tk.Tk):
             return
         rate = done / elapsed
         remaining = (total - done) / rate if rate > 0 else 0
+        current = ""
+        if self._current_file and self._current_frame_total:
+            current = (f"  ·  {self._current_file}: frame "
+                      f"{self._current_frame_done}/{self._current_frame_total}")
+        scan_elapsed = format_duration(time.monotonic() - self._scan_started)
         self.status.set(
-            f"{self._summary}  {done:,} / {total:,}  ·  "
-            f"{rate:,.1f} {self._phase_unit}/s  ·  {format_duration(remaining)} left")
+            f"{self._summary}  {done:,} / {total:,}{current}  ·  "
+            f"{rate:,.1f} {self._phase_unit}/s  ·  {format_duration(remaining)} left"
+            f"  ·  {scan_elapsed} elapsed")
 
     def _finish_scan(self) -> None:
         self._cancel = None

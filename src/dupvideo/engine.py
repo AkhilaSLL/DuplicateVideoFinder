@@ -219,10 +219,18 @@ class UnreadableVideoError(RuntimeError):
 
 def fingerprint(
     path: str, sample_count: int = SAMPLE_COUNT,
+    on_frame: Callable[[int, int], None] | None = None,
 ) -> tuple[int, int, float, tuple[int, ...], tuple[int, ...]]:
     """
     Return ``(width, height, duration, dhashes, phashes)`` for the video at
     ``path``.  Raises :class:`UnreadableVideoError` if it cannot be decoded.
+
+    ``on_frame(done, sample_count)`` fires after each sampled position is
+    seeked-to and read, whether or not that read succeeded - seeking a large
+    or high-bitrate file can dominate the time a whole video takes to
+    fingerprint, so this is the only sub-file granularity available to a
+    caller that wants to show the scan isn't actually stuck between one
+    file finishing and the next.
     """
     cap = cv2.VideoCapture(path)
     try:
@@ -239,9 +247,11 @@ def fingerprint(
         dhashes: list[int] = []
         phashes: list[int] = []
         duration_ms = duration * 1000.0
-        for frac in sample_positions(sample_count):
+        for index, frac in enumerate(sample_positions(sample_count)):
             cap.set(cv2.CAP_PROP_POS_MSEC, frac * duration_ms)
             ok, frame = cap.read()
+            if on_frame is not None:
+                on_frame(index + 1, sample_count)
             if not ok:
                 continue
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -302,6 +312,9 @@ def _default_workers() -> int:
     return max(2, min(8, (os.cpu_count() or 4)))
 
 
+FrameProgressFn = Callable[[str, int, int], None]
+
+
 def scan_videos(
     paths: Iterable[str],
     progress: ProgressFn | None = None,
@@ -309,6 +322,7 @@ def scan_videos(
     workers: int | None = None,
     cache: CacheLike | None = None,
     sample_count: int = SAMPLE_COUNT,
+    frame_progress: FrameProgressFn | None = None,
 ) -> tuple[list[VidInfo], list[tuple[str, str]]]:
     """
     Fingerprint every path.  Returns ``(infos, errors)`` where ``errors`` is a
@@ -319,6 +333,10 @@ def scan_videos(
     be byte-identical to anything.  Unlike images, only the *decoded
     fingerprint* (a handful of small hashes, not the sampled frames
     themselves) is ever kept in memory or in the cache.
+
+    ``frame_progress(path, done, sample_count)`` is the sub-file counterpart
+    to ``progress`` - see :func:`fingerprint`. It does not fire for cache
+    hits, since those never call :func:`fingerprint` at all.
     """
     paths = list(paths)
     errors: list[tuple[str, str]] = []
@@ -356,7 +374,10 @@ def scan_videos(
                            phashes=hit.phashes,
                            md5=hit.md5 if need_md5 else "")
 
-        width, height, duration, dh, ph = fingerprint(path, sample_count)
+        on_frame = ((lambda done, total, p=path: frame_progress(p, done, total))
+                    if frame_progress is not None else None)
+        width, height, duration, dh, ph = fingerprint(
+            path, sample_count, on_frame=on_frame)
         md5 = md5_of_file(path) if need_md5 else ""
         if cache is not None:
             entry = CachedFingerprint(
