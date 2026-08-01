@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> Cross-project conventions and machine/environment facts shared with sibling
+> projects (e.g. `../DuplicateImageFinder`) live in the parent directory's
+> `../CLAUDE.md`, not here. This file only covers what's specific to
+> **this** project.
+
 ## Commands
 
 All commands assume the virtual environment is active (`.venv\Scripts\activate` on Windows) or are prefixed accordingly.
