@@ -96,6 +96,7 @@ class App(tk.Tk):
         self._phase_started = 0.0
         self._phase_total = 0
         self._phase_rate = False
+        self._phase_unit = ""
         self._phase_done = 0
 
         self._build_ui()
@@ -446,7 +447,7 @@ class App(tk.Tk):
 
         self._clear_results()
         self._scan_started = time.monotonic()
-        self._set_phase("Collecting files…", 0, rate=False)
+        self._set_phase("Collecting files…", rate=False)
         self.scan_btn.config(text="Cancel", style="Danger.TButton")
 
         self._cancel = threading.Event()
@@ -457,13 +458,14 @@ class App(tk.Tk):
             daemon=True).start()
         self._poll_job = self.after(POLL_MS, self._poll_queue)
 
-    def _set_phase(self, text: str, total: int, rate: bool) -> None:
+    def _set_phase(self, text: str, rate: bool, unit: str = "") -> None:
         self._summary = text
         self._phase_started = time.monotonic()
-        self._phase_total = total
+        self._phase_total = 0
         self._phase_rate = rate
+        self._phase_unit = unit
         self._phase_done = 0
-        self.progress.config(maximum=max(1, total or 100), value=0)
+        self.progress.config(maximum=100, value=0)
         self._refresh_status()
 
     def _scan_worker(self, folders: list[str], recursive: bool,
@@ -474,20 +476,19 @@ class App(tk.Tk):
             if cancel.is_set():
                 put(("cancelled", None))
                 return
-            put(("phase", ("Fingerprinting videos…", len(paths), True)))
+            put(("phase", ("Fingerprinting videos…", True, "video")))
             infos, errors = scan_videos(
                 paths,
-                progress=lambda done, _total: put(("progress", done)),
+                progress=lambda done, total: put(("progress", (done, total))),
                 cancel=cancel, cache=cache)
             if cancel.is_set():
                 put(("cancelled", None))
                 return
 
-            put(("phase", ("Comparing videos…", 100, False)))
+            put(("phase", ("Comparing videos…", True, "pair")))
             groups = group_duplicates(
                 infos, threshold, cancel=cancel,
-                progress=lambda done, total: put(
-                    ("progress", int(100 * done / max(1, total)))))
+                progress=lambda done, total: put(("progress", (done, total))))
             if cancel.is_set():
                 put(("cancelled", None))
                 return
@@ -497,16 +498,16 @@ class App(tk.Tk):
 
     def _poll_queue(self) -> None:
         self._poll_job = None
-        latest_progress: int | None = None
+        latest_progress: tuple[int, int] | None = None
         try:
             while True:
                 kind, payload = self._queue.get_nowait()
                 if kind == "phase":
-                    text, maximum, rate = payload
+                    text, rate, unit = payload
                     latest_progress = None
-                    self._set_phase(text, maximum, rate)
+                    self._set_phase(text, rate, unit)
                 elif kind == "progress":
-                    # Coalesce: one repaint per poll, not one per file.
+                    # Coalesce: one repaint per poll, not one per file/pair.
                     latest_progress = payload
                 elif kind == "error":
                     self._finish_scan()
@@ -531,22 +532,23 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         if latest_progress is not None:
-            self._show_progress(latest_progress)
+            self._show_progress(*latest_progress)
         self._poll_job = self.after(POLL_MS, self._poll_queue)
 
-    def _show_progress(self, done: int) -> None:
+    def _show_progress(self, done: int, total: int) -> None:
         self._phase_done = done
-        self.progress.config(value=done)
-        if not self._phase_rate or not self._phase_total:
+        self._phase_total = total
+        self.progress.config(maximum=max(1, total), value=done)
+        if not self._phase_rate or not total:
             return
         elapsed = time.monotonic() - self._phase_started
         if elapsed < 0.4 or done <= 0:
             return
         rate = done / elapsed
-        remaining = (self._phase_total - done) / rate if rate > 0 else 0
+        remaining = (total - done) / rate if rate > 0 else 0
         self.status.set(
-            f"Fingerprinting videos…  {done:,} / {self._phase_total:,}  ·  "
-            f"{rate:,.1f} video/s  ·  {format_duration(remaining)} left")
+            f"{self._summary}  {done:,} / {total:,}  ·  "
+            f"{rate:,.1f} {self._phase_unit}/s  ·  {format_duration(remaining)} left")
 
     def _finish_scan(self) -> None:
         self._cancel = None
