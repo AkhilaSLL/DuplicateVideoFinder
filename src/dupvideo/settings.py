@@ -4,22 +4,29 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 from .cache import default_dir
 
 FILE_NAME = "settings.json"
-MAX_REMEMBERED_FOLDERS = 12
 
 
 @dataclass
 class Settings:
-    folders: list[str] = field(default_factory=list)
+    """
+    Persisted UI state.
+
+    The scan folder list is deliberately *not* remembered - a scan always
+    starts from an empty folder list, so a stale folder can never be swept
+    into a new scan by accident.
+    """
+
     recursive: bool = True
     threshold: int = 90
     auto_choice: str = ""
     use_cache: bool = True
-    geometry: str = ""
+    geometry: str = ""          # size/position when *not* maximised
+    maximized: bool = False
     sash: int = 0
 
     @property
@@ -40,11 +47,9 @@ class Settings:
             return settings
 
         # Read field by field so a hand-edited or older file can never inject
-        # a wrong type into the UI; unknown keys are simply ignored.
-        folders = data.get("folders")
-        if isinstance(folders, list):
-            settings.folders = [f for f in folders if isinstance(f, str)]
-        for name in ("recursive", "use_cache"):
+        # a wrong type into the UI; unknown keys (e.g. "folders", written by
+        # versions that used to remember them) are simply ignored.
+        for name in ("recursive", "use_cache", "maximized"):
             value = data.get(name)
             if isinstance(value, bool):
                 setattr(settings, name, value)
@@ -58,7 +63,6 @@ class Settings:
                 setattr(settings, name, value)
 
         settings.threshold = min(100, max(70, settings.threshold))
-        settings.folders = settings.folders[:MAX_REMEMBERED_FOLDERS]
         return settings
 
     def save(self, path: str | None = None) -> None:

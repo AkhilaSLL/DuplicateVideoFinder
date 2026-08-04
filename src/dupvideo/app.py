@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import traceback
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
@@ -33,7 +34,17 @@ from .resources import (
 )
 from .settings import Settings
 from .shellops import open_file, restore_from_recycle_bin, reveal_in_file_manager
-from .theme import ACCENT, BORDER, CHECKED_FG, ELEV, FG, FG_MUTED, WINDOW, apply_theme
+from .theme import (
+    ACCENT,
+    BORDER,
+    CHECKED_FG,
+    ELEV,
+    FG,
+    FG_MUTED,
+    FONT,
+    WINDOW,
+    apply_theme,
+)
 
 try:
     from send2trash import send2trash
@@ -90,6 +101,11 @@ class App(tk.Tk):
         self._cancel: threading.Event | None = None
         self._poll_job: str | None = None
         self._undo: tuple[list[str], list[list[VidInfo]]] | None = None
+        # Last geometry seen while *not* maximised.  Once the window is
+        # zoomed, Tk reports the maximised size from winfo_geometry() and the
+        # maximised size with the restored position from wm_geometry(), so the
+        # restore geometry has to be captured as it changes or it is lost.
+        self._normal_geometry = ""
 
         # Scan progress bookkeeping, for throughput and ETA.
         self._scan_started = 0.0
@@ -104,6 +120,7 @@ class App(tk.Tk):
 
         self._build_ui()
         self._apply_settings()
+        self.bind("<Configure>", self._on_window_configure)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(60, self._style_titlebar)
 
@@ -264,6 +281,10 @@ class App(tk.Tk):
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
 
+        self._mark_width = tkfont.Font(root=self, font=(FONT, 10)).measure(
+            CHECKED_MARK)
+
+        self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", self._on_tree_double)
         self.tree.bind("<space>", self._on_toggle_selected)
@@ -345,10 +366,9 @@ class App(tk.Tk):
 
     # ---- settings --------------------------------------------------------- #
     def _apply_settings(self) -> None:
+        # The folder list is intentionally not restored - every launch starts
+        # with no folders queued for scanning.
         saved = self.settings
-        for folder in saved.folders:
-            if os.path.isdir(folder):
-                self.folder_list.insert("end", folder)
         self.recursive.set(saved.recursive)
         self.use_cache.set(saved.use_cache)
         self.thr_scale.set(saved.threshold)
@@ -357,27 +377,51 @@ class App(tk.Tk):
         if saved.geometry:
             with contextlib.suppress(tk.TclError):
                 self.geometry(saved.geometry)
+            self._normal_geometry = saved.geometry
+        if saved.maximized:
+            # Deferred: zooming a window that has not been mapped yet loses
+            # the geometry just set as its restore size.
+            self.after(0, self._maximize)
         self._refresh_cache_label()
+
+    def _maximize(self) -> None:
+        with contextlib.suppress(tk.TclError):
+            self.state("zoomed")
+
+    def _is_maximized(self) -> bool:
+        try:
+            return self.state() == "zoomed"
+        except tk.TclError:
+            return False
+
+    def _on_window_configure(self, event: tk.Event) -> None:
+        if event.widget is self and not self._is_maximized():
+            self._normal_geometry = self.winfo_geometry()
 
     def _capture_settings(self) -> Settings:
         sash = 0
         with contextlib.suppress(tk.TclError):
             sash = self.paned.sashpos(0)
+        maximized = self._is_maximized()
+        geometry = self.winfo_geometry()
+        if maximized and self._normal_geometry:
+            geometry = self._normal_geometry
         return Settings(
-            folders=self._folders(),
             recursive=bool(self.recursive.get()),
             threshold=int(self.threshold.get()),
             auto_choice=self.auto_choice.get(),
             use_cache=bool(self.use_cache.get()),
-            geometry=self.winfo_geometry(),
+            geometry=geometry,
+            maximized=maximized,
             sash=sash,
         )
 
     def _refresh_cache_label(self) -> None:
         count = self.cache.count()
-        self.cache_btn.config(
-            text="Clear cache" if not count else f"Clear cache ({count:,})",
-            state="normal" if count else "disabled")
+        text = "Clear cache" if not count else f"Clear cache ({count:,})"
+        # Widen with the count - a fixed width clips "Clear cache (12,345)".
+        self.cache_btn.config(text=text, width=max(12, len(text) + 1),
+                              state="normal" if count else "disabled")
 
     def _clear_cache(self) -> None:
         if messagebox.askyesno(
@@ -660,6 +704,41 @@ class App(tk.Tk):
                 self._path_for_item[item] = info.path
 
     # ---- check state ------------------------------------------------------ #
+    def _checkbox_item(self, event: tk.Event) -> str | None:
+        """The file row whose ☐/☑ mark was clicked, if the click hit one."""
+        if self.tree.identify_region(event.x, event.y) != "tree":
+            return None                       # a value column, or the heading
+        item = self.tree.identify_row(event.y)
+        if not item or item not in self._path_for_item:
+            return None                       # a group header, or empty space
+        bbox = self.tree.bbox(item, "#0")
+        if not bbox:
+            return None
+        x0, y0, _w, h = bbox
+        # bbox("#0") starts at the indented cell, which still leads with the
+        # expand indicator (drawn empty for a childless row, so nothing else
+        # claims those pixels); the mark is the start of the text after it.
+        text_x = x0
+        limit = x0 + self._px(40)
+        while (text_x < limit
+               and self.tree.identify_element(text_x, y0 + h // 2) != "text"):
+            text_x += 2
+        return item if event.x <= text_x + self._mark_width else None
+
+    def _on_tree_click(self, event: tk.Event) -> str | None:
+        """Clicking the mark toggles that row instead of only selecting it."""
+        item = self._checkbox_item(event)
+        if item is None:
+            return None
+        variable = self.checkbox_vars.get(self._path_for_item[item])
+        if variable is None:
+            return None
+        # Select as well, so the preview follows the row that was just ticked.
+        self.tree.selection_set(item)
+        self.tree.focus(item)
+        variable.set(not variable.get())
+        return "break"
+
     def _on_check(self, path: str) -> None:
         if self._bulk:
             return

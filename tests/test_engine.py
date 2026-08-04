@@ -445,16 +445,16 @@ def test_cache_prune_evicts_old_rows(tmp_path):
 
 def test_settings_defaults_when_file_missing(tmp_path):
     settings = Settings.load(str(tmp_path / "nope.json"))
-    assert settings.folders == []
     assert settings.threshold == 90
     assert settings.recursive is True
+    assert settings.maximized is False
 
 
 def test_settings_round_trip(tmp_path):
     path = str(tmp_path / "settings.json")
-    original = Settings(folders=["C:/videos"], recursive=False, threshold=85,
+    original = Settings(recursive=False, threshold=85,
                         auto_choice="Shorter duration", use_cache=False,
-                        geometry="800x600", sash=300)
+                        geometry="800x600+10+10", maximized=True, sash=300)
     original.save(path)
     loaded = Settings.load(path)
     assert loaded == original
@@ -463,12 +463,26 @@ def test_settings_round_trip(tmp_path):
 def test_settings_rejects_malformed_types(tmp_path):
     path = str(tmp_path / "settings.json")
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write('{"folders": "not-a-list", "threshold": "ninety", '
-                '"recursive": "yes"}')
+        fh.write('{"threshold": "ninety", "recursive": "yes", '
+                '"maximized": 1, "geometry": 800}')
     settings = Settings.load(path)
-    assert settings.folders == []
     assert settings.threshold == 90
     assert settings.recursive is True
+    assert settings.maximized is False
+    assert settings.geometry == ""
+
+
+def test_settings_never_persists_scan_folders(tmp_path):
+    """Folders are deliberately forgotten between launches."""
+    path = str(tmp_path / "settings.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write('{"folders": ["C:/videos"], "threshold": 85}')
+    settings = Settings.load(path)
+    assert not hasattr(settings, "folders")
+    assert settings.threshold == 85          # the rest of the file still loads
+    settings.save(path)
+    with open(path, encoding="utf-8") as fh:
+        assert "folders" not in fh.read()
 
 
 def test_settings_clamps_threshold_range(tmp_path):
@@ -482,6 +496,6 @@ def test_settings_clamps_threshold_range(tmp_path):
 
 
 def test_settings_save_is_atomic_and_never_raises(tmp_path):
-    settings = Settings(folders=["x"])
+    settings = Settings(geometry="800x600+0+0")
     # A directory that cannot exist must not raise.
     settings.save(os.path.join(os.sep, "no", "such", "dir", "s.json"))

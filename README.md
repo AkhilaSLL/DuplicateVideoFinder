@@ -91,8 +91,10 @@ dist\DuplicateVideoFinder.exe
 
 Add **as many folders as you like** with **Add folder…**; duplicates are
 found inside each folder *and* across all of them. Select entries and press
-**Remove** (or <kbd>Delete</kbd>) to drop them. Your folder list is remembered
-between launches.
+**Remove** (or <kbd>Delete</kbd>) to drop them. The folder list is *not* kept
+between launches — every session starts empty, so a folder can never be swept
+into a scan you didn't mean to run. Everything else (window size, match
+threshold, options) is remembered.
 
 - **Include subfolders** toggles recursive scanning.
 - **Reuse cached hashes** skips re-fingerprinting files that haven't changed
@@ -134,7 +136,8 @@ whichever one was least convinced. Byte-identical files always read **100%**.
 | Newer date        | the **oldest** file        |
 
 Auto-select always **keeps one file per group**. You can also tick files
-individually via the preview checkboxes, or **select several rows** (click,
+individually — click the ☐ next to a file name in the results list, or use the
+preview checkboxes — or **select several rows** (click,
 <kbd>Ctrl</kbd>-click, <kbd>Shift</kbd>-click — selecting a group header covers
 its whole group) and press <kbd>Space</kbd> to toggle them together. **Select
 all / Clear** cover everything.
