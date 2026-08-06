@@ -27,10 +27,41 @@ from .theme import ACCENT, BORDER, ELEV, FG, FG_MUTED, FONT, FONT_BOLD, WINDOW
 
 THUMB_MIN = 160             # never shrink a video's whole preview block below this
 THUMB_MAX = 620             # width cap so a lone video isn't huge
-CAPTION_SPACE = 150         # vertical room reserved for caption + checkbox
+CAPTION_SPACE = 182         # vertical room reserved for caption + checkbox
 FRAME_GAP = 2               # gap between mini-frames inside one video's grid
 CACHE_BUDGET = 160 << 20    # ~160 MB of decoded preview frames
 RESIZE_DEBOUNCE_MS = 130
+FOLDER_CHARS_MAX = 120      # never show more of a folder path than this
+FOLDER_CHARS_MIN = 44       # ...nor less, however narrow the cell gets
+
+
+def elide_middle(text: str, limit: int) -> str:
+    """
+    Shorten ``text`` to ``limit`` characters by dropping from the middle.
+
+    The middle is the right thing to drop for a path: the head carries the
+    drive and top-level folder, the tail carries the deepest folders, and
+    between them those are what tell two source folders apart.  Trimming from
+    either end alone throws away one half of that.
+    """
+    if len(text) <= limit:
+        return text
+    keep = limit - 1                        # one character goes to the ellipsis
+    head = keep // 2
+    return f"{text[:head]}…{text[len(text) - (keep - head):]}"
+
+
+def folder_caption(path: str, box_w: int) -> str:
+    """
+    The folder ``path`` sits in, trimmed to roughly two lines at ``box_w``.
+
+    Ordinary paths fit whole; the budget only exists so one deeply nested path
+    can't wrap into five lines and stretch its cell taller than its neighbours.
+    At the 9pt caption font a character averages a little under 5px, so
+    ``box_w // 3`` is a conservative two lines' worth.
+    """
+    budget = min(FOLDER_CHARS_MAX, max(FOLDER_CHARS_MIN, box_w // 3))
+    return elide_middle(os.path.dirname(path), budget)
 
 
 class _FrameSetCache:
@@ -307,6 +338,12 @@ class Gallery(ttk.LabelFrame):
         tk.Label(cell, text=os.path.basename(info.path), bg=WINDOW, fg=FG,
                  font=(FONT_BOLD, 10), wraplength=max(box_w, 160),
                  justify="center").pack(pady=(round(8 * scale), 1))
+        # Which folder the file came from.  A group can span several scanned
+        # folders and two copies of the same video usually share a name, so the
+        # folder is the only thing in the caption that tells them apart.
+        tk.Label(cell, text=folder_caption(info.path, box_w),
+                 bg=WINDOW, fg=FG_MUTED, font=(FONT, 8),
+                 wraplength=max(box_w, 160), justify="center").pack(pady=(0, 2))
         tk.Label(cell, text=f"Match {info.match:.1f}%", bg=WINDOW, fg=ACCENT,
                  font=(FONT_BOLD, 9)).pack()
         tk.Label(cell, text=f"{info.res_str}   ·   {info.duration_str}   ·   "

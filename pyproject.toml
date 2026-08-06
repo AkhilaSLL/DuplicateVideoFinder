@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dupvideo"
-version = "1.1.1"
+version = "1.2.0"
 description = "Find and remove duplicate / near-duplicate videos, safely."
 readme = "README.md"
 requires-python = ">=3.10"

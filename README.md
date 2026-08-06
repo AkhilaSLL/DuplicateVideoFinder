@@ -117,6 +117,11 @@ any frame — or a row in the list — to open the real file in your default
 video player. **Right-click** a row for **Open**, **Show in Explorer** and
 **Copy full path**.
 
+Each tile is captioned with its file name **and the folder it came from**, which
+is what tells two copies apart when you are scanning more than one folder and
+both copies share a name. Very long paths are shortened from the middle, keeping
+the drive and the deepest folders — the parts that actually differ.
+
 Match % is the *lower* of the two hash sequences' scores, so it reflects
 whichever one was least convinced. Byte-identical files always read **100%**.
 
