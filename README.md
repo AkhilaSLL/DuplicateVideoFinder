@@ -89,8 +89,10 @@ dist\DuplicateVideoFinder.exe
 
 ### 1. Choose folders
 
-Add **as many folders as you like** with **Add folder…**; duplicates are
-found inside each folder *and* across all of them. Select entries and press
+**Drag folders straight in from Explorer**, or use **Add folder…**. Add as
+many as you like; duplicates are found inside each folder *and* across all of
+them. Dropping a *file* adds the folder containing it, so a handful of selected
+clips works as well as the folder itself. Select entries and press
 **Remove** (or <kbd>Delete</kbd>) to drop them. The folder list is *not* kept
 between launches — every session starts empty, so a folder can never be swept
 into a scan you didn't mean to run. Everything else (window size, match
@@ -228,6 +230,8 @@ Both the cache and your saved settings live in:
 │   ├── cache.py                    SQLite fingerprint cache
 │   ├── settings.py                 settings persisted between launches
 │   ├── shellops.py                 open / reveal / restore from Recycle Bin
+│   ├── dnd.py                      folders dragged in from Explorer
+│   ├── folderpanel.py              folder list, drop zone, empty state
 │   ├── app.py                      main window and controller
 │   ├── gallery.py                  side-by-side sampled-frame preview panel
 │   ├── theme.py                    dark ttk theme

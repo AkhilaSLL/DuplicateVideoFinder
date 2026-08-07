@@ -10,7 +10,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import traceback
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 from typing import Any
 
 from PIL import Image, ImageTk
@@ -25,6 +25,7 @@ from .engine import (
     keeper_index,
     scan_videos,
 )
+from .folderpanel import FolderPanel
 from .gallery import Gallery
 from .resources import (
     apply_dark_titlebar,
@@ -38,10 +39,17 @@ from .theme import (
     ACCENT,
     BORDER,
     CHECKED_FG,
+    EDGE,
     ELEV,
     FG,
     FG_MUTED,
     FONT,
+    GAP,
+    GAP_SECTION,
+    GAP_TIGHT,
+    GAP_WIDE,
+    ON_FILL,
+    PAD_CARD,
     WINDOW,
     apply_theme,
 )
@@ -155,111 +163,130 @@ class App(tk.Tk):
             pass
 
     def _build_ui(self) -> None:
-        edge = self._px(18)
+        edge = self._px(EDGE)
 
         header = ttk.Frame(self, style="Window.TFrame")
-        header.pack(fill="x", padx=edge, pady=(self._px(14), self._px(6)))
+        header.pack(fill="x", padx=edge, pady=(self._px(GAP_WIDE),
+                                               self._px(GAP_WIDE)))
         try:
             with Image.open(asset_path("app.png")) as raw:
                 logo = raw.convert("RGBA").resize(
-                    (self._px(34), self._px(34)), Image.Resampling.LANCZOS)
+                    (self._px(30), self._px(30)), Image.Resampling.LANCZOS)
             self._logo_photo = ImageTk.PhotoImage(logo)
             tk.Label(header, image=self._logo_photo, bg=WINDOW,
-                     bd=0).pack(side="left")
+                     bd=0).pack(side="left", padx=(0, self._px(GAP_TIGHT)))
         except Exception:
             pass
-        ttk.Label(header, text="  Duplicate Video Finder",
+        ttk.Label(header, text="Duplicate Video Finder",
                   style="Title.TLabel").pack(side="left")
         ttk.Label(header, text="finds re-encoded & near-duplicate videos  ·  "
                               "deletes only to the Recycle Bin",
-                  style="WindowMuted.TLabel").pack(side="left",
-                                                   padx=self._px(14))
+                  style="Tagline.TLabel").pack(side="left",
+                                               padx=(self._px(GAP_WIDE), 0))
 
-        self._build_folders(edge)
+        self._build_setup(edge)
         self._build_results(edge)
         self._build_actions(edge)
         self._build_status(edge)
         self._build_context_menu()
 
-    def _build_folders(self, edge: int) -> None:
-        top = ttk.LabelFrame(self, text="  FOLDERS  ")
-        top.pack(fill="x", padx=edge, pady=self._px(6))
+    def _card(self, edge: int, bottom: int) -> ttk.Frame:
+        """A bordered panel on the window background, with its inner padding."""
+        card = ttk.Frame(self, style="Card.TFrame")
+        card.pack(fill="x", padx=edge, pady=(0, self._px(bottom)))
+        body = ttk.Frame(card, style="TFrame")
+        body.pack(fill="both", expand=True, padx=self._px(PAD_CARD),
+                  pady=self._px(PAD_CARD))
+        return body
 
+    def _rule(self, parent: tk.Misc, pady: tuple[int, int]) -> None:
+        tk.Frame(parent, background=BORDER, height=1).pack(fill="x", pady=pady)
+
+    def _build_setup(self, edge: int) -> None:
         self.recursive = tk.BooleanVar(value=True)
         self.use_cache = tk.BooleanVar(value=True)
         self.threshold = tk.IntVar(value=90)
 
-        listing = ttk.Frame(top)
-        listing.grid(row=0, column=0, sticky="nsew",
-                     padx=(self._px(8), self._px(4)), pady=self._px(8))
-        self.folder_list = tk.Listbox(
-            listing, height=3, selectmode="extended", activestyle="none",
-            bg=ELEV, fg=FG, bd=0, highlightthickness=1,
-            highlightbackground=BORDER, highlightcolor=ACCENT,
-            selectbackground=ACCENT, selectforeground="#ffffff",
-            exportselection=False, font=("Segoe UI", 10))
-        scroll = ttk.Scrollbar(listing, orient="vertical",
-                               command=self.folder_list.yview)
-        self.folder_list.configure(yscrollcommand=scroll.set)
-        self.folder_list.grid(row=0, column=0, sticky="nsew")
-        scroll.grid(row=0, column=1, sticky="ns")
-        listing.rowconfigure(0, weight=1)
-        listing.columnconfigure(0, weight=1)
-        self.folder_list.bind("<Double-1>", self._on_folder_double)
-        self.folder_list.bind("<Delete>", lambda _e: self._remove_folders())
+        body = self._card(edge, GAP_SECTION)
 
-        buttons = ttk.Frame(top)
-        buttons.grid(row=0, column=1, sticky="n",
-                     padx=(0, self._px(8)), pady=self._px(8))
-        ttk.Button(buttons, text="Add folder…", width=13,
-                   command=self._add_folder).pack(fill="x")
-        ttk.Button(buttons, text="Remove", width=13, style="Secondary.TButton",
-                   command=self._remove_folders).pack(fill="x",
-                                                      pady=(self._px(4), 0))
-        top.columnconfigure(0, weight=1)
+        legend = ttk.Frame(body, style="TFrame")
+        legend.pack(fill="x", pady=(0, self._px(GAP)))
+        ttk.Label(legend, text="FOLDERS TO SCAN",
+                  style="Legend.TLabel").pack(side="left")
+        self.folder_count = ttk.Label(legend, text="", style="Muted.TLabel")
+        self.folder_count.pack(side="right")
 
-        options = ttk.Frame(top)
-        options.grid(row=1, column=0, columnspan=2, sticky="we",
-                     padx=self._px(8), pady=(0, self._px(8)))
-        ttk.Checkbutton(options, text="Include subfolders",
-                        variable=self.recursive).pack(
-            side="left", padx=(0, self._px(16)))
-        ttk.Checkbutton(options, text="Reuse cached hashes",
-                        variable=self.use_cache).pack(side="left")
-        self.cache_btn = ttk.Button(options, text="Clear cache", width=12,
-                                    style="Secondary.TButton",
-                                    command=self._clear_cache)
-        self.cache_btn.pack(side="left", padx=self._px(8))
+        self.folder_panel = FolderPanel(
+            body, self.scale_factor, on_open=self._open_path,
+            on_change=self._on_folders_changed,
+            dialog_title="Add a folder to scan",
+            empty_hint="Drop folders of videos here")
+        self.folder_panel.pack(fill="x")
 
-        self.scan_btn = ttk.Button(options, text="Scan", width=10,
+        self._rule(body, (self._px(PAD_CARD), self._px(GAP_WIDE)))
+
+        options = ttk.Frame(body, style="TFrame")
+        options.pack(fill="x")
+
+        # Scan is the card's one primary action, so it is packed first and
+        # sits hard right; everything else on this row is a modifier.
+        self.scan_btn = ttk.Button(options, text="Scan", width=11,
                                    command=self._on_scan_clicked)
         self.scan_btn.pack(side="right")
-        self.thr_label = ttk.Label(options, text="90%", width=5,
-                                   style="Muted.TLabel")
-        self.thr_scale = ttk.Scale(options, from_=70, to=100,
+
+        threshold = ttk.Frame(options, style="TFrame")
+        threshold.pack(side="right", padx=(self._px(GAP_WIDE),
+                                           self._px(GAP_WIDE)))
+        ttk.Label(threshold, text="Minimum match", style="Muted.TLabel").pack(
+            side="left", padx=(0, self._px(GAP)))
+        self.thr_scale = ttk.Scale(threshold, from_=70, to=100,
                                    command=self._on_threshold,
-                                   length=self._px(200))
-        ttk.Label(options, text="Min match").pack(side="left",
-                                                  padx=(self._px(16), 0))
-        self.thr_scale.pack(side="left", padx=self._px(8))
-        self.thr_label.pack(side="left", padx=(0, self._px(10)))
+                                   length=self._px(180))
+        self.thr_scale.pack(side="left")
+        self.thr_label = ttk.Label(threshold, text="90%", width=5,
+                                   anchor="e", style="Value.TLabel")
+        self.thr_label.pack(side="left", padx=(self._px(GAP), 0))
+
+        ttk.Checkbutton(options, text="Include subfolders",
+                        variable=self.recursive).pack(
+            side="left", padx=(0, self._px(GAP_WIDE)))
+        ttk.Checkbutton(options, text="Reuse cached hashes",
+                        variable=self.use_cache).pack(side="left")
+        self.cache_btn = ttk.Button(options, text="Clear cache",
+                                    style="Ghost.TButton",
+                                    command=self._clear_cache)
+        self.cache_btn.pack(side="left", padx=(self._px(GAP_WIDE), 0))
+
         # Only now - Scale.set() fires the command, which needs thr_label.
         self.thr_scale.set(self.threshold.get())
+        self._on_folders_changed()
 
     def _build_results(self, edge: int) -> None:
         self.paned = ttk.Panedwindow(self, orient="horizontal")
-        self.paned.pack(fill="both", expand=True, padx=edge, pady=self._px(6))
+        self.paned.pack(fill="both", expand=True, padx=edge,
+                        pady=(0, self._px(GAP_SECTION)))
 
-        left = ttk.Frame(self.paned)
+        left = ttk.Frame(self.paned, style="Card.TFrame")
+        header = ttk.Frame(left, style="TFrame")
+        header.grid(row=0, column=0, columnspan=2, sticky="ew",
+                    padx=self._px(PAD_CARD),
+                    pady=(self._px(PAD_CARD), self._px(GAP)))
+        ttk.Label(header, text="DUPLICATE GROUPS",
+                  style="Legend.TLabel").pack(side="left")
+        self.group_count = ttk.Label(header, text="", style="Muted.TLabel")
+        self.group_count.pack(side="right")
+
         columns = ("size", "date", "res", "duration", "match")
         self.tree = ttk.Treeview(left, columns=columns, show="tree headings",
                                  selectmode="extended")
-        self.tree.heading("#0", text="File")
-        self.tree.heading("size", text="Size")
-        self.tree.heading("date", text="Modified")
-        self.tree.heading("res", text="Resolution")
-        self.tree.heading("duration", text="Duration")
-        self.tree.heading("match", text="Match")
+        # Headings follow their column's own alignment; a centred "Size" over
+        # right-aligned figures reads as a different column to the data.
+        self.tree.heading("#0", text="File", anchor="w")
+        self.tree.heading("size", text="Size", anchor="e")
+        self.tree.heading("date", text="Modified", anchor="center")
+        self.tree.heading("res", text="Resolution", anchor="center")
+        self.tree.heading("duration", text="Duration", anchor="center")
+        self.tree.heading("match", text="Match", anchor="center")
         self.tree.column("#0", width=self._px(260), minwidth=self._px(140),
                          stretch=True)
         self.tree.column("size", width=self._px(76), stretch=False, anchor="e")
@@ -276,10 +303,19 @@ class App(tk.Tk):
 
         ysb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ysb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        ysb.grid(row=0, column=1, sticky="ns")
-        left.rowconfigure(0, weight=1)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        ysb.grid(row=1, column=1, sticky="ns")
+        left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
+
+        # An empty Treeview draws nothing at all, so on a first run the widest
+        # column of the window said less than the preview beside it.  This
+        # label covers the rows only while there are none.
+        self.tree_empty = ttk.Label(
+            self.tree, style="Muted.TLabel", anchor="center", justify="center",
+            text="Groups of duplicates appear here.\n\n"
+                 "Add the folders to compare, then Scan.")
+        self._sync_tree_empty()
 
         self._mark_width = tkfont.Font(root=self, font=(FONT, 10)).measure(
             CHECKED_MARK)
@@ -297,51 +333,64 @@ class App(tk.Tk):
         self.after(120, self._init_sash)
 
     def _build_actions(self, edge: int) -> None:
-        bottom = ttk.Frame(self, style="Window.TFrame")
-        bottom.pack(fill="x", padx=edge, pady=(self._px(6), 0))
+        body = self._card(edge, GAP_SECTION)
 
-        auto = ttk.LabelFrame(bottom, text="  AUTO-SELECT FOR DELETION  ")
-        auto.pack(side="left", fill="x", expand=True)
-        ttk.Label(auto, text="Delete files with").pack(
-            side="left", padx=(self._px(10), self._px(6)), pady=self._px(8))
-        self.auto_choice = tk.StringVar(value=AUTOSELECT_OPTIONS[0])
-        ttk.Combobox(auto, textvariable=self.auto_choice,
-                     values=list(AUTOSELECT_OPTIONS), state="readonly",
-                     width=18).pack(side="left", padx=self._px(4))
-        ttk.Button(auto, text="Apply", command=self._apply_autoselect).pack(
-            side="left", padx=self._px(6))
-        ttk.Label(auto, text="(always keeps one per group)",
-                  style="Muted.TLabel").pack(side="left", padx=self._px(6))
-        ttk.Button(auto, text="Clear", style="Secondary.TButton",
-                   command=lambda: self._set_all(False)).pack(
-            side="left", padx=(self._px(10), self._px(2)))
-        ttk.Button(auto, text="Select all", style="Secondary.TButton",
-                   command=lambda: self._set_all(True)).pack(
-            side="left", padx=self._px(2))
+        legend = ttk.Frame(body, style="TFrame")
+        legend.pack(fill="x", pady=(0, self._px(GAP)))
+        ttk.Label(legend, text="SELECT FOR DELETION",
+                  style="Legend.TLabel").pack(side="left")
+        ttk.Label(legend, text="one copy per group is always kept",
+                  style="Muted.TLabel").pack(side="left",
+                                             padx=(self._px(GAP), 0))
 
+        row = ttk.Frame(body, style="TFrame")
+        row.pack(fill="x")
+
+        # The destructive action is the last thing on the row and the only
+        # filled red on screen; Undo sits beside it because it is only ever
+        # wanted immediately after.
         self.delete_btn = ttk.Button(
-            bottom, text="Delete selected  →  Recycle Bin",
+            row, text="Delete selected  →  Recycle Bin",
             style="Danger.TButton", command=self._delete_selected)
-        self.delete_btn.pack(side="right", padx=(self._px(6), 0))
-        self.undo_btn = ttk.Button(bottom, text="Undo delete", width=13,
-                                   style="Secondary.TButton", state="disabled",
+        self.delete_btn.pack(side="right")
+        self.undo_btn = ttk.Button(row, text="Undo delete", width=13,
+                                   style="Ghost.TButton", state="disabled",
                                    command=self._undo_delete)
-        self.undo_btn.pack(side="right", padx=(self._px(14), 0))
+        self.undo_btn.pack(side="right", padx=(0, self._px(GAP)))
+
+        # The criterion names what gets *deleted*; keeper_index() returns the
+        # one file it spares.  Wording this the other way round inverts it.
+        ttk.Label(row, text="Delete files with", style="Muted.TLabel").pack(
+            side="left", padx=(0, self._px(GAP)))
+        self.auto_choice = tk.StringVar(value=AUTOSELECT_OPTIONS[0])
+        ttk.Combobox(row, textvariable=self.auto_choice,
+                     values=list(AUTOSELECT_OPTIONS), state="readonly",
+                     width=18).pack(side="left")
+        ttk.Button(row, text="Apply", style="Secondary.TButton",
+                   command=self._apply_autoselect).pack(
+            side="left", padx=(self._px(GAP), 0))
+        ttk.Button(row, text="Select all", style="Ghost.TButton",
+                   command=lambda: self._set_all(True)).pack(
+            side="left", padx=(self._px(GAP_WIDE), 0))
+        ttk.Button(row, text="Clear", style="Ghost.TButton",
+                   command=lambda: self._set_all(False)).pack(
+            side="left", padx=(self._px(GAP_TIGHT), 0))
 
     def _build_status(self, edge: int) -> None:
+        tk.Frame(self, background=BORDER, height=1).pack(fill="x")
         bar = ttk.Frame(self, style="Window.TFrame")
-        bar.pack(fill="x", padx=edge, pady=(self._px(8), self._px(12)))
+        bar.pack(fill="x", padx=edge, pady=self._px(GAP_WIDE))
         self.status = tk.StringVar(value=self._summary)
         ttk.Label(bar, textvariable=self.status, anchor="w",
                   style="WindowMuted.TLabel").pack(side="left", fill="x",
                                                    expand=True)
         self.progress = ttk.Progressbar(bar, mode="determinate",
-                                        length=self._px(260))
-        self.progress.pack(side="right", padx=(self._px(14), 0))
+                                        length=self._px(240))
+        self.progress.pack(side="right", padx=(self._px(GAP_WIDE), 0))
 
     def _build_context_menu(self) -> None:
         self.menu = tk.Menu(self, tearoff=0, bg=ELEV, fg=FG,
-                            activebackground=ACCENT, activeforeground="#ffffff",
+                            activebackground=ACCENT, activeforeground=ON_FILL,
                             activeborderwidth=0, bd=0,
                             disabledforeground=FG_MUTED)
         self.menu.add_command(label="Open", command=self._open_selected)
@@ -433,29 +482,23 @@ class App(tk.Tk):
 
     # ---- folders ---------------------------------------------------------- #
     def _folders(self) -> list[str]:
-        return list(self.folder_list.get(0, "end"))
+        return self.folder_panel.folders()
 
-    def _add_folder(self) -> None:
-        existing = self._folders()
-        chosen = filedialog.askdirectory(
-            title="Add a folder to scan",
-            initialdir=existing[-1] if existing else None)
-        if not chosen:
-            return
-        folder = os.path.normpath(chosen)
-        if any(os.path.normcase(f) == os.path.normcase(folder)
-               for f in existing):
-            return
-        self.folder_list.insert("end", folder)
+    def _sync_tree_empty(self) -> None:
+        groups = len(self.tree.get_children())
+        if groups:
+            self.tree_empty.place_forget()
+        else:
+            self.tree_empty.place(relx=0.5, rely=0.42, anchor="center")
+        self.group_count.config(
+            text="" if not groups else
+            f"{groups} group" if groups == 1 else f"{groups} groups")
 
-    def _remove_folders(self) -> None:
-        for index in reversed(self.folder_list.curselection()):
-            self.folder_list.delete(index)
-
-    def _on_folder_double(self, _event: tk.Event | None = None) -> None:
-        selection = self.folder_list.curselection()
-        if selection:
-            self._open_path(self.folder_list.get(selection[0]))
+    def _on_folders_changed(self) -> None:
+        count = len(self._folders())
+        self.folder_count.config(
+            text="" if not count else
+            f"{count} folder" if count == 1 else f"{count} folders")
 
     # ---- small helpers ---------------------------------------------------- #
     def _on_threshold(self, raw: str) -> None:
@@ -665,6 +708,7 @@ class App(tk.Tk):
         self._checked_bytes = 0
         self._shown_group = None
         self._set_undo(None)
+        self._sync_tree_empty()
         self.gallery.clear_cache()
         self.gallery.show_message("Scan, then select a duplicate group to\n"
                                   "compare its videos side by side.")
@@ -702,6 +746,7 @@ class App(tk.Tk):
                             info.duration_str, f"{info.match:.1f}%"))
                 self._item_for_path[info.path] = item
                 self._path_for_item[item] = info.path
+        self._sync_tree_empty()
 
     # ---- check state ------------------------------------------------------ #
     def _checkbox_item(self, event: tk.Event) -> str | None:
