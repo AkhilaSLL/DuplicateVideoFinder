@@ -37,6 +37,16 @@ from .theme import (
 
 THUMB_MIN = 160             # never shrink a video's whole preview block below this
 THUMB_MAX = 620             # width cap so a lone video isn't huge
+# Block size once a group wraps into a contact sheet.  Unlike the sibling image
+# projects this is not square: the block is itself a 4x2 grid of mini-frames
+# (see _grid_shape), whose natural aspect for 16:9 footage is about 3.6:1, so a
+# square block would leave the frames tiny with empty bands above and below.
+# 264 wide gives each mini-frame ~64px - well over the ~38px the narrowest
+# unwrapped block managed - and still fits three videos across a 900px panel.
+# The height is deliberately taller than 16:9 footage needs so that portrait
+# video is merely small rather than unreadable.
+THUMB_WRAP_W = 264
+THUMB_WRAP_H = 110
 CAPTION_SPACE = 182         # vertical room reserved for caption + checkbox
 FRAME_GAP = 2               # gap between mini-frames inside one video's grid
 CACHE_BUDGET = 160 << 20    # ~160 MB of decoded preview frames
@@ -143,6 +153,7 @@ class Gallery(ttk.Frame):
         self._vars: Mapping[str, tk.BooleanVar] = {}
         self._photos: list[ImageTk.PhotoImage] = []
         self._resize_job: str | None = None
+        self._fitting = False
         self._last_size = (0, 0)
         self._weighted: tuple[tuple[int, ...], tuple[int, ...]] = ((), ())
 
@@ -233,6 +244,9 @@ class Gallery(ttk.Frame):
         return -1 if event.delta > 0 else 1
 
     def _on_wheel(self, event: tk.Event) -> None:
+        # A group that wraps is taller than the viewport, so the plain wheel
+        # scrolls down; a group that fits on one row never is, and there the
+        # plain wheel falls back to sideways so it still does something.
         if self._overflows_vertically():
             self.canvas.yview_scroll(self._wheel_steps(event), "units")
         else:
@@ -260,22 +274,59 @@ class Gallery(ttk.Frame):
         self._resize_job = self.after(RESIZE_DEBOUNCE_MS, self._render)
 
     def _fit_window(self) -> None:
-        width = max(self.canvas.winfo_width(), self.inner.winfo_reqwidth())
-        height = max(self.canvas.winfo_height(), self.inner.winfo_reqheight())
-        self.canvas.itemconfigure(self._window, width=width, height=height)
-        self.canvas.configure(scrollregion=(0, 0, width, height))
+        """
+        Stretch the canvas window to at least the viewport size so the inner
+        frame's spacer rows/columns can centre the content, and keep the
+        scrollregion in sync with whichever is larger.
 
-    def _video_box(self, count: int) -> tuple[int, int]:
-        """Total block size (grid of mini-frames) reserved for one video."""
+        The ``update_idletasks`` is not optional.  This runs immediately after
+        ``_render`` grids the cells, before Tk has recomputed the frame's
+        requested size - it used to measure a couple of hundred pixels for a
+        group thousands wide.  Pinning the canvas window to that stale width
+        then stopped the frame's *actual* size from ever changing again, so the
+        ``<Configure>`` binding meant to correct it never fired and anything
+        past the first screenful was unreachable at any scroll position.
+        """
+        if self._fitting:          # update_idletasks re-enters via <Configure>
+            return
+        self._fitting = True
+        try:
+            self.inner.update_idletasks()
+            width = max(self.canvas.winfo_width(), self.inner.winfo_reqwidth())
+            height = max(self.canvas.winfo_height(),
+                         self.inner.winfo_reqheight())
+            self.canvas.itemconfigure(self._window, width=width, height=height)
+            self.canvas.configure(scrollregion=(0, 0, width, height))
+        finally:
+            self._fitting = False
+
+    def _video_box(self, count: int) -> tuple[int, int, int]:
+        """
+        Return ``(box_w, box_h, columns)`` - the block size (a grid of
+        mini-frames) reserved for one video, and how many fit per row.
+
+        A group small enough to sit in one row gets the full height of the
+        panel and an equal share of its width.  Once that share would squeeze
+        the blocks below THUMB_MIN the group wraps onto further rows instead of
+        running off the right edge: a big group is then browsed by scrolling
+        *down*, which is the direction a mouse wheel scrolls anyway, rather
+        than sideways along a strip several thousand pixels wide.
+        """
         scale = self._scale
         canvas_w = self.canvas.winfo_width() or round(900 * scale)
         canvas_h = self.canvas.winfo_height() or round(540 * scale)
-        reserved = round(CAPTION_SPACE * scale)
-        box_h = int(max(THUMB_MIN * scale,
-                        min(THUMB_MAX, canvas_h - reserved)))
-        share = (canvas_w - 28 * scale) / max(1, count) - 18 * scale
-        box_w = int(min(THUMB_MAX * scale, max(THUMB_MIN * scale, share)))
-        return box_w, box_h
+        margin, gap = round(28 * scale), round(18 * scale)
+
+        share = (canvas_w - margin) / max(1, count) - gap
+        if share >= THUMB_MIN * scale:
+            reserved = round(CAPTION_SPACE * scale)
+            box_h = int(max(THUMB_MIN * scale,
+                            min(THUMB_MAX, canvas_h - reserved)))
+            return int(min(THUMB_MAX * scale, share)), box_h, count
+
+        box_w = int(THUMB_WRAP_W * scale)
+        return (box_w, int(THUMB_WRAP_H * scale),
+                max(1, int((canvas_w - margin) // (box_w + gap))))
 
     # ---- content ---------------------------------------------------------- #
     def _reset(self) -> None:
@@ -332,15 +383,17 @@ class Gallery(ttk.Frame):
             return
         self._reset()
 
-        box_w, box_h = self._video_box(len(group))
+        box_w, box_h, columns = self._video_box(len(group))
         scale = self._scale
         pad = round(8 * scale)
+        rows = (len(group) + columns - 1) // columns
 
-        self._set_spacers((0, 2), (0, len(group) + 1))
+        self._set_spacers((0, rows + 1), (0, columns + 1))
 
-        for column, info in enumerate(group, start=1):
+        for position, info in enumerate(group):
+            row, column = divmod(position, columns)
             cell = tk.Frame(self.inner, bg=WINDOW)
-            cell.grid(row=1, column=column, sticky="n",
+            cell.grid(row=row + 1, column=column + 1, sticky="n",
                       padx=pad, pady=round(10 * scale))
             self._build_cell(cell, info, box_w, box_h)
 
