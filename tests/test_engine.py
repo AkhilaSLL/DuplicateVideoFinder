@@ -406,11 +406,13 @@ def test_cache_round_trip(tmp_path):
     assert cache.count() == 1
 
 
-def test_cache_degrades_silently_on_unwritable_path():
-    # A drive letter that (almost certainly) doesn't exist can't have its
-    # directory created, unlike a plain missing path under C:\ which
-    # os.makedirs would happily create.
-    cache = FingerprintCache(r"Z:\this\path\does\not\exist\x.sqlite3")
+def test_cache_degrades_silently_on_unwritable_path(tmp_path):
+    # A path whose parent is a regular file can never have its directory
+    # created, on any machine.  (A merely-missing path won't do: os.makedirs
+    # would happily create it, and a drive-relative one lands under C:\.)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")
+    cache = FingerprintCache(str(blocker / "sub" / "x.sqlite3"))
     assert cache.available is False
     assert cache.load(["k"]) == {}
     cache.store([CachedFingerprint(key="k", size=1, mtime_ns=1, width=1,
@@ -497,5 +499,9 @@ def test_settings_clamps_threshold_range(tmp_path):
 
 def test_settings_save_is_atomic_and_never_raises(tmp_path):
     settings = Settings(geometry="800x600+0+0")
-    # A directory that cannot exist must not raise.
-    settings.save(os.path.join(os.sep, "no", "such", "dir", "s.json"))
+    # A directory that cannot exist must not raise.  The parent is a regular
+    # file so os.makedirs genuinely fails; a drive-relative path like
+    # "\no\such\dir" would just get created under C:\.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")
+    settings.save(str(blocker / "sub" / "s.json"))
